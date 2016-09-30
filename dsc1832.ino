@@ -1,28 +1,54 @@
+#include <SPI.h>
+#include <avr/pgmspace.h>
+#include "CRC32.h"
+#include <QueueArray.h>
+
 #define CLK 3 // Keybus Yellow
 #define DTA 4 // Keybus Green
 #define DTA_OUT 8 // Keybus Green Output
-#include <SPI.h>
-#include <avr/pgmspace.h>
+#define BUTTON A0 // Analog interface for keypress
+
 #define DEVICEID "0952"
 #define MAX_BITS 200
 #define KEYPAD_IDLE "111111111111111111111111"
 
 int cmdp=0, cmdk=0;
 String oldp="", oldk="", wordp="", wordk="", msgp="", msgk="";
-String st, st2;
+char hex[] = "0123456789abcdef";
+String st, st2, st2_a;
 unsigned long lastData;
 char buf[100];
-long pulseTime=micros(),lastTime=micros(),oldTime=micros();
+long pulseTime=micros(),lastTime=micros();
 long intervalTimer = 0;
 long counter = 0;
+int startWrite=0;
+int buttonCheck=0;
+const int buttonPin = 12;     // the number of the pushbutton pin
+const int ledPin =  13;      // the number of the LED pin
+// Variables will change:
+int buttonPushCounter = 0;   // counter for the number of button presses
+int buttonState = 0;         // current state of the button
+int lastButtonState = 0;     // previous state of the button
 
+
+PROGMEM const uint32_t crc_table[16] = {
+    0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
+    0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
+    0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
+    0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c
+};
 
 void setup()
 {
   pinMode(CLK,INPUT);
   pinMode(DTA,INPUT);
   pinMode(DTA_OUT, OUTPUT);
-  Serial.begin(19200);
+  pinMode(BUTTON, INPUT_PULLUP); // sets analog pin for input
+    // initialize the LED pin as an output:
+  pinMode(ledPin, OUTPUT);
+  // initialize the pushbutton pin as an input:
+  pinMode(buttonPin, INPUT);
+  Serial.begin(115200);
   Serial.println("Booting");
  
   // Interrupt 1 = PIN 3 external
@@ -32,16 +58,40 @@ void setup()
 }
 void loop()
 {
-  intervalTimer = (oldTime-lastTime)-(lastTime-pulseTime);
-  if (intervalTimer < 0) intervalTimer = intervalTimer*-1;
+  // read the state of the pushbutton value:
+  buttonState = digitalRead(buttonPin);
 
-  if ((intervalTimer < 4900) || (st.length() < 50)) return; 
+  if (buttonState != lastButtonState) {
+    // if the state has changed, increment the counter
+    if (buttonState == HIGH) {
+      // if the current state is HIGH then the button
+      // wend from off to on:
+      buttonPushCounter++;
+      Serial.println("on");
+      Serial.print("number of button pushes:  ");
+      Serial.println(buttonPushCounter);
+    } else {
+      // if the current state is LOW then the button
+      // wend from on to off:
+      Serial.println("off");
+    }
+    // Delay a little bit to avoid bouncing
+    delay(50);
+  }
+  // save the current state as the last state,
+  //for next time through the loop
+  lastButtonState = buttonState;
+  
+
+//  Serial.println(intervalTimer);
+
+  if ((intervalTimer < 5400) || (st.length() < 50)) return; 
   //if (waitCLKchange(1) < 2000) return;  // First falling clock after sync is being added to it's own string messing up the client.  Need to fix to write
 
   wordp = st;
   st = ""; 
-  wordk = st2;
-  st2 = "1"; // first bit always gets missed so add it here
+  wordk = st2_a;
+  //st2 = "1"; // need this because missing first clock
 
 
   //Serial.println(wordp);
@@ -63,11 +113,14 @@ void loop()
 
 void clkCalled()
 {
-  oldTime = lastTime;
   lastTime = pulseTime;
   pulseTime = micros();
-  if (intervalTimer > 4900) { 
+  intervalTimer = pulseTime-lastTime;
+  if (intervalTimer > 5000) { 
     counter++; 
+    startWrite=0;
+    st2_a = st2;
+    st2="";
   }
 
   if (counter > 1) {
@@ -75,8 +128,17 @@ void clkCalled()
       if (st.length() > MAX_BITS) return; // Do not overflow the arduino's little ram
       if (digitalRead(DTA)) st += "1"; else st += "0";
     } else {
+      startWrite++;
+      if ((startWrite > 0) && (startWrite < 24)) { 
+/*       if (startWrite%2)
+         digitalWrite(DTA_OUT, HIGH);
+       else
+         digitalWrite(DTA_OUT, LOW);*/
+      }
+
       if (st2.length() > MAX_BITS) return;
       if (digitalRead(DTA)) st2 += "1"; else st2 += "0";
+
     }
   }
 }
@@ -111,10 +173,10 @@ String formatDisplayKeypad(String &st)
 {
   String res;
   res = st.substring(0,8) + " ";
-  int grps = (st.length()) / 8;
+  int grps = ((st.length()) / 8)-1;
   for(int i=0;i<grps;i++)
   {
-    res += st.substring(9+(i*8),9+((i+1)*8)) + " ";
+    res += st.substring(8+(i*8),9+((i+1)*8)) + " ";
   }
   res += st.substring((grps*8)+9,st.length());
   return res;
@@ -145,6 +207,25 @@ String formatSt(String &st)
   unsigned long crc = crc_string(buf);
   res += String(";") + String(crc,HEX);
   return res;
+}
+
+unsigned long crc_update(unsigned long crc, byte data)
+{
+    byte tbl_idx;
+    tbl_idx = crc ^ (data >> (0 * 4));
+    crc = pgm_read_dword_near(crc_table + (tbl_idx & 0x0f)) ^ (crc >> 4);
+    tbl_idx = crc ^ (data >> (1 * 4));
+    crc = pgm_read_dword_near(crc_table + (tbl_idx & 0x0f)) ^ (crc >> 4);
+    return crc;
+}
+
+unsigned long crc_string(char *s)
+{
+  unsigned long crc = ~0L;
+  while (*s)
+    crc = crc_update(crc, *s++);
+  crc = ~crc;
+  return crc;
 }
 
 String hex8(int num) {
@@ -309,16 +390,56 @@ static int decode(String word, String &msg) {
 void serialPrint(String word, String msg, int cmd, int type) {
   if (type==1) {
      Serial.print("Panel : ");
+//     Serial.print(word);
      Serial.print(formatDisplay(word));
   } else {
      Serial.print("Client: "); 
+//     Serial.print(word); 
      Serial.print(formatDisplayKeypad(word));
   }
   Serial.print("-> ");
   Serial.print(counter);
   Serial.print(": ");
+  //Serial.print(hex8(cmd));
   Serial.print(cmd, HEX);
   Serial.print(":");
   Serial.println(msg);
 }
 
+int readButtons(int pin)
+// returns the button number pressed, or zero for none pressed 
+// int pin is the analog pin number to read 
+{
+  int b,c = 0;
+  c=analogRead(pin); // get the analog value  
+  if (c>1000)
+  {
+    b=0; // buttons have not been pressed
+  }   
+else
+  if (c>440 && c<470)
+  {
+    b=1; // button 1 pressed
+  }     
+  else
+    if (c<400 && c>370)
+    {
+      b=2; // button 2 pressed
+    }       
+    else
+      if (c>280 && c<310)
+      {
+        b=3; // button 3 pressed
+      }         
+      else
+        if (c>150 && c<180)
+        {
+          b=4; // button 4 pressed
+        }           
+        else
+          if (c<20)
+          {
+            b=5; // button 5 pressed
+          }
+return b;
+}
